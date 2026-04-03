@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terminal</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%2311111b'/><text x='18' y='68' font-size='55' font-family='monospace' font-weight='bold' fill='%2394e2d5'>$_</text></svg>">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    :root {
+      --bg: #1e1e2e;
+      --tab-bg: #11111b;
+      --tab-active: #1e1e2e;
+      --tab-text: #cdd6f4;
+      --tab-text-inactive: #6c7086;
+      --border: #313244;
+      --btn-hover: #45475a;
+      --close-hover: #f38ba8;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #eff1f5;
+        --tab-bg: #ccd0da;
+        --tab-active: #eff1f5;
+        --tab-text: #4c4f69;
+        --tab-text-inactive: #9ca0b0;
+        --border: #ccd0da;
+        --btn-hover: #bcc0cc;
+        --close-hover: #d20f39;
+      }
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+
+    #tab-bar {
+      display: flex;
+      align-items: flex-end;
+      background: var(--tab-bg);
+      border-bottom: none;
+      height: 40px;
+      padding: 0 4px 0 12px;
+      gap: 2px;
+      user-select: none;
+    }
+
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 6px 6px 0 0;
+      color: var(--tab-text-inactive);
+      cursor: pointer;
+      font-size: 13px;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+
+    .tab:hover { background: var(--btn-hover); }
+    .tab.active { background: var(--tab-active); color: var(--tab-text); }
+
+    .tab .close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      font-size: 14px;
+      line-height: 1;
+      opacity: 0;
+      transition: opacity 0.15s, color 0.15s;
+    }
+
+    .tab:hover .close, .tab.active .close { opacity: 1; }
+    .tab .close:hover { color: var(--close-hover); background: var(--btn-hover); }
+
+    #add-tab {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 6px;
+      color: var(--tab-text-inactive);
+      cursor: pointer;
+      font-size: 18px;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    #add-tab:hover { background: var(--btn-hover); color: var(--tab-text); }
+
+    #terminals {
+      height: calc(100% - 40px);
+      position: relative;
+    }
+
+    .terminal-container {
+      position: absolute;
+      inset: 0;
+      padding: 0 8px 8px 8px;
+      display: none;
+    }
+
+    .terminal-container.active { display: block; }
+
+    .terminal-container .xterm { height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="tab-bar">
+    <div id="add-tab" title="New tab">+</div>
+  </div>
+  <div id="terminals"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+  <script>
+    const tabs = [];
+    let activeTabId = null;
+    let tabCounter = 0;
+
+    const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+    const darkTheme = {
+      background: "#1e1e2e",
+      foreground: "#cdd6f4",
+      cursor: "#f5e0dc",
+      cursorAccent: "#1e1e2e",
+      selectionBackground: "#585b7066",
+      black: "#45475a",
+      red: "#f38ba8",
+      green: "#a6e3a1",
+      yellow: "#f9e2af",
+      blue: "#89b4fa",
+      magenta: "#f5c2e7",
+      cyan: "#94e2d5",
+      white: "#bac2de",
+      brightBlack: "#585b70",
+      brightRed: "#f38ba8",
+      brightGreen: "#a6e3a1",
+      brightYellow: "#f9e2af",
+      brightBlue: "#89b4fa",
+      brightMagenta: "#f5c2e7",
+      brightCyan: "#94e2d5",
+      brightWhite: "#a6adc8",
+    };
+
+    const lightTheme = {
+      background: "#eff1f5",
+      foreground: "#4c4f69",
+      cursor: "#dc8a78",
+      cursorAccent: "#eff1f5",
+      selectionBackground: "#7c7f9366",
+      black: "#5c5f77",
+      red: "#d20f39",
+      green: "#40a02b",
+      yellow: "#df8e1d",
+      blue: "#1e66f5",
+      magenta: "#ea76cb",
+      cyan: "#179299",
+      white: "#acb0be",
+      brightBlack: "#6c6f85",
+      brightRed: "#d20f39",
+      brightGreen: "#40a02b",
+      brightYellow: "#df8e1d",
+      brightBlue: "#1e66f5",
+      brightMagenta: "#ea76cb",
+      brightCyan: "#179299",
+      brightWhite: "#bcc0cc",
+    };
+
+    function createTab() {
+      const id = ++tabCounter;
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${protocol}//${location.host}`);
+
+      const container = document.createElement("div");
+      container.className = "terminal-container";
+      container.id = `term-${id}`;
+      document.getElementById("terminals").appendChild(container);
+
+      const term = new Terminal({
+        theme: isDark ? darkTheme : lightTheme,
+        fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace',
+        fontSize: 14,
+        lineHeight: 1.7,
+        cursorBlink: true,
+        cursorStyle: "block",
+        allowProposedApi: true,
+      });
+
+      const fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+      term.open(container);
+      fitAddon.fit();
+
+      term.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "input", data }));
+        }
+      });
+
+      ws.onopen = () => {
+        fitAddon.fit();
+        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      };
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "output") {
+          term.write(msg.data);
+        } else if (msg.type === "exit") {
+          removeTab(id);
+        }
+      };
+
+      ws.onclose = () => {
+        // Connection lost - show message in terminal
+        term.write("\r\n\x1b[31m[Connection closed]\x1b[0m\r\n");
+      };
+
+      const tab = { id, ws, term, fitAddon, container };
+      tabs.push(tab);
+
+      const resizeObserver = new ResizeObserver(() => {
+        if (tab === getActiveTab()) {
+          fitAddon.fit();
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+          }
+        }
+      });
+      resizeObserver.observe(container);
+      tab.resizeObserver = resizeObserver;
+
+      renderTabs();
+      switchTab(id);
+
+      return tab;
+    }
+
+    function getActiveTab() {
+      return tabs.find((t) => t.id === activeTabId);
+    }
+
+    function switchTab(id) {
+      activeTabId = id;
+      tabs.forEach((t) => {
+        t.container.classList.toggle("active", t.id === id);
+      });
+      renderTabs();
+      const tab = getActiveTab();
+      if (tab) {
+        tab.fitAddon.fit();
+        tab.term.focus();
+      }
+    }
+
+    function removeTab(id) {
+      const idx = tabs.findIndex((t) => t.id === id);
+      if (idx === -1) return;
+
+      const tab = tabs[idx];
+      tab.ws.close();
+      tab.term.dispose();
+      tab.resizeObserver.disconnect();
+      tab.container.remove();
+      tabs.splice(idx, 1);
+
+      if (tabs.length === 0) {
+        createTab();
+      } else if (activeTabId === id) {
+        const nextIdx = Math.min(idx, tabs.length - 1);
+        switchTab(tabs[nextIdx].id);
+      } else {
+        renderTabs();
+      }
+    }
+
+    function renderTabs() {
+      const bar = document.getElementById("tab-bar");
+      const addBtn = document.getElementById("add-tab");
+
+      bar.querySelectorAll(".tab").forEach((el) => el.remove());
+
+      tabs.forEach((t, i) => {
+        const el = document.createElement("div");
+        el.className = `tab${t.id === activeTabId ? " active" : ""}`;
+        el.innerHTML = `<span>Terminal ${i + 1}</span><span class="close">&times;</span>`;
+        el.querySelector("span").addEventListener("click", () => switchTab(t.id));
+        el.querySelector(".close").addEventListener("click", (e) => {
+          e.stopPropagation();
+          removeTab(t.id);
+        });
+        bar.insertBefore(el, addBtn);
+      });
+    }
+
+    document.getElementById("add-tab").addEventListener("click", createTab);
+
+    // Keyboard shortcut: Ctrl/Cmd+T for new tab
+    document.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "t") {
+        e.preventDefault();
+        createTab();
+      }
+    });
+
+    // Start with one tab
+    createTab();
+  </script>
+</body>
+</html>
