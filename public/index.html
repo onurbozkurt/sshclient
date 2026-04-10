@@ -129,6 +129,8 @@
     let activeTabId = null;
     let tabCounter = 0;
 
+    const STORAGE_KEY = "web-terminal-sessions";
+
     const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
     const darkTheme = {
@@ -179,7 +181,27 @@
       brightWhite: "#bcc0cc",
     };
 
-    function createTab() {
+    function saveSessionState() {
+      const state = {
+        tabs: tabs.map((t) => t.sessionId).filter(Boolean),
+        activeIndex: tabs.findIndex((t) => t.id === activeTabId),
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function loadSessionState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) return JSON.parse(raw);
+      } catch {}
+      return null;
+    }
+
+    function clearSessionState() {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+
+    function initTab(sessionId) {
       const id = ++tabCounter;
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${protocol}//${location.host}`);
@@ -193,6 +215,8 @@
         theme: isDark ? darkTheme : lightTheme,
         fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace',
         fontSize: 14,
+        fontWeight: "200",
+        fontWeightBold: "400",
         lineHeight: 1.7,
         cursorBlink: true,
         cursorStyle: "block",
@@ -213,6 +237,11 @@
       });
 
       ws.onopen = () => {
+        if (sessionId) {
+          ws.send(JSON.stringify({ type: "attach", sessionId }));
+        } else {
+          ws.send(JSON.stringify({ type: "new" }));
+        }
         fitAddon.fit();
         ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       };
@@ -221,17 +250,21 @@
         const msg = JSON.parse(e.data);
         if (msg.type === "output") {
           term.write(msg.data);
+        } else if (msg.type === "session") {
+          tab.sessionId = msg.id;
+          saveSessionState();
+        } else if (msg.type === "session_expired") {
+          // Server created a new session for us, we'll get a "session" message next
         } else if (msg.type === "exit") {
           removeTab(id);
         }
       };
 
       ws.onclose = () => {
-        // Connection lost - show message in terminal
         term.write("\r\n\x1b[31m[Connection closed]\x1b[0m\r\n");
       };
 
-      const tab = { id, ws, term, fitAddon, container };
+      const tab = { id, ws, term, fitAddon, container, sessionId: sessionId || null };
       tabs.push(tab);
 
       const resizeObserver = new ResizeObserver(() => {
@@ -251,6 +284,10 @@
       return tab;
     }
 
+    function createTab() {
+      return initTab(null);
+    }
+
     function getActiveTab() {
       return tabs.find((t) => t.id === activeTabId);
     }
@@ -261,6 +298,7 @@
         t.container.classList.toggle("active", t.id === id);
       });
       renderTabs();
+      saveSessionState();
       const tab = getActiveTab();
       if (tab) {
         tab.fitAddon.fit();
@@ -286,6 +324,7 @@
         switchTab(tabs[nextIdx].id);
       } else {
         renderTabs();
+        saveSessionState();
       }
     }
 
@@ -318,8 +357,35 @@
       }
     });
 
-    // Start with one tab
-    createTab();
+    // Restore sessions or start fresh
+    async function init() {
+      const saved = loadSessionState();
+      if (saved && saved.tabs && saved.tabs.length > 0) {
+        // Check which sessions are still alive on the server
+        try {
+          const res = await fetch("/api/sessions");
+          const aliveSessions = await res.json();
+          const aliveSet = new Set(aliveSessions);
+          const validSessions = saved.tabs.filter((sid) => aliveSet.has(sid));
+
+          if (validSessions.length > 0) {
+            validSessions.forEach((sid) => initTab(sid));
+            // Restore active tab
+            const activeIdx = Math.min(
+              Math.max(saved.activeIndex || 0, 0),
+              tabs.length - 1
+            );
+            switchTab(tabs[activeIdx].id);
+            return;
+          }
+        } catch {}
+      }
+      // No saved sessions or all expired — start fresh
+      clearSessionState();
+      createTab();
+    }
+
+    init();
   </script>
 </body>
 </html>
