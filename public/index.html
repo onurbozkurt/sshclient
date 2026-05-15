@@ -20,14 +20,14 @@
 
     @media (prefers-color-scheme: light) {
       :root {
-        --bg: #eff1f5;
-        --tab-bg: #ccd0da;
-        --tab-active: #eff1f5;
-        --tab-text: #4c4f69;
-        --tab-text-inactive: #9ca0b0;
-        --border: #ccd0da;
-        --btn-hover: #bcc0cc;
-        --close-hover: #d20f39;
+        --bg: #faf4ed;
+        --tab-bg: #f2e9e1;
+        --tab-active: #fffaf3;
+        --tab-text: #575279;
+        --tab-text-inactive: #9893a5;
+        --border: #dfdad9;
+        --btn-hover: #eae4df;
+        --close-hover: #b4637a;
       }
     }
 
@@ -59,6 +59,7 @@
       border-radius: 6px 6px 0 0;
       color: var(--tab-text-inactive);
       cursor: pointer;
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
       font-size: 13px;
       white-space: nowrap;
       transition: background 0.15s;
@@ -131,7 +132,8 @@
 
     const STORAGE_KEY = "web-terminal-sessions";
 
-    const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const darkModeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const currentTheme = () => (darkModeQuery.matches ? darkTheme : lightTheme);
 
     const darkTheme = {
       background: "#1e1e2e",
@@ -158,27 +160,27 @@
     };
 
     const lightTheme = {
-      background: "#eff1f5",
-      foreground: "#4c4f69",
-      cursor: "#dc8a78",
-      cursorAccent: "#eff1f5",
-      selectionBackground: "#7c7f9366",
-      black: "#5c5f77",
-      red: "#d20f39",
-      green: "#40a02b",
-      yellow: "#df8e1d",
-      blue: "#1e66f5",
-      magenta: "#ea76cb",
-      cyan: "#179299",
-      white: "#acb0be",
-      brightBlack: "#6c6f85",
-      brightRed: "#d20f39",
-      brightGreen: "#40a02b",
-      brightYellow: "#df8e1d",
-      brightBlue: "#1e66f5",
-      brightMagenta: "#ea76cb",
-      brightCyan: "#179299",
-      brightWhite: "#bcc0cc",
+      background: "#faf4ed",
+      foreground: "#575279",
+      cursor: "#d7827e",
+      cursorAccent: "#faf4ed",
+      selectionBackground: "#dfdad966",
+      black: "#797593",
+      red: "#b4637a",
+      green: "#618774",
+      yellow: "#ea9d34",
+      blue: "#286983",
+      magenta: "#907aa9",
+      cyan: "#56949f",
+      white: "#575279",
+      brightBlack: "#9893a5",
+      brightRed: "#b4637a",
+      brightGreen: "#618774",
+      brightYellow: "#ea9d34",
+      brightBlue: "#286983",
+      brightMagenta: "#907aa9",
+      brightCyan: "#56949f",
+      brightWhite: "#575279",
     };
 
     function saveSessionState() {
@@ -212,7 +214,7 @@
       document.getElementById("terminals").appendChild(container);
 
       const term = new Terminal({
-        theme: isDark ? darkTheme : lightTheme,
+        theme: currentTheme(),
         fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace',
         fontSize: 14,
         fontWeight: "200",
@@ -253,6 +255,9 @@
         } else if (msg.type === "session") {
           tab.sessionId = msg.id;
           saveSessionState();
+        } else if (msg.type === "cwd") {
+          tab.cwd = msg.cwd;
+          renderTabs();
         } else if (msg.type === "session_expired") {
           // Server created a new session for us, we'll get a "session" message next
         } else if (msg.type === "exit") {
@@ -264,7 +269,7 @@
         term.write("\r\n\x1b[31m[Connection closed]\x1b[0m\r\n");
       };
 
-      const tab = { id, ws, term, fitAddon, container, sessionId: sessionId || null };
+      const tab = { id, ws, term, fitAddon, container, sessionId: sessionId || null, cwd: null };
       tabs.push(tab);
 
       const resizeObserver = new ResizeObserver(() => {
@@ -328,6 +333,14 @@
       }
     }
 
+    function formatCwd(cwd) {
+      if (!cwd) return "…";
+      // Server already substitutes $HOME → "~". Truncate very long paths from the left.
+      const MAX_LEN = 32;
+      if (cwd.length <= MAX_LEN) return cwd;
+      return "…" + cwd.slice(cwd.length - MAX_LEN + 1);
+    }
+
     function renderTabs() {
       const bar = document.getElementById("tab-bar");
       const addBtn = document.getElementById("add-tab");
@@ -337,9 +350,17 @@
       tabs.forEach((t, i) => {
         const el = document.createElement("div");
         el.className = `tab${t.id === activeTabId ? " active" : ""}`;
-        el.innerHTML = `<span>Terminal ${i + 1}</span><span class="close">&times;</span>`;
-        el.querySelector("span").addEventListener("click", () => switchTab(t.id));
-        el.querySelector(".close").addEventListener("click", (e) => {
+        const label = `${i + 1}: ${formatCwd(t.cwd)}`;
+        const labelSpan = document.createElement("span");
+        labelSpan.textContent = label;
+        if (t.cwd) labelSpan.title = t.cwd;
+        const closeSpan = document.createElement("span");
+        closeSpan.className = "close";
+        closeSpan.innerHTML = "&times;";
+        el.appendChild(labelSpan);
+        el.appendChild(closeSpan);
+        labelSpan.addEventListener("click", () => switchTab(t.id));
+        closeSpan.addEventListener("click", (e) => {
           e.stopPropagation();
           removeTab(t.id);
         });
@@ -349,12 +370,11 @@
 
     document.getElementById("add-tab").addEventListener("click", createTab);
 
-    // Keyboard shortcut: Ctrl/Cmd+T for new tab
-    document.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "t") {
-        e.preventDefault();
-        createTab();
-      }
+    darkModeQuery.addEventListener("change", () => {
+      const theme = currentTheme();
+      tabs.forEach((t) => {
+        t.term.options.theme = theme;
+      });
     });
 
     // Restore sessions or start fresh

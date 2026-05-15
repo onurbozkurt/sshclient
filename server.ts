@@ -3,6 +3,7 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
 import path from "path";
+import fs from "fs";
 import { execSync } from "child_process";
 import crypto from "crypto";
 
@@ -10,8 +11,12 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
+const publicDir = fs.existsSync(path.join(__dirname, "public"))
+    ? path.join(__dirname, "public")
+    : path.join(__dirname, "..", "public");
+
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(publicDir));
 
 function findShell(): string {
     if (process.platform === "darwin") {
@@ -39,17 +44,39 @@ interface Session {
     ws: WebSocket | null;
     cleanupTimer: ReturnType<typeof setTimeout> | null;
     alive: boolean; // false once the pty process exits
+    cwd: string;
+}
+
+// OSC 7 sequence: ESC ] 7 ; file://host/path BEL (or ESC ] 7 ; ... ESC \)
+const OSC7_REGEX = /\x1b\]7;file:\/\/[^/]*(\/[^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+
+function decodeCwd(encoded: string): string {
+    try {
+        return decodeURIComponent(encoded);
+    } catch {
+        return encoded;
+    }
+}
+
+const HOME = process.env.HOME || "";
+
+function displayCwd(cwd: string): string {
+    if (HOME && (cwd === HOME || cwd.startsWith(HOME + "/"))) {
+        return "~" + cwd.slice(HOME.length);
+    }
+    return cwd;
 }
 
 const sessions = new Map<string, Session>();
 
 function createSession(): Session {
     const id = crypto.randomUUID();
+    const initialCwd = process.env.HOME || "/";
     const term = pty.spawn(shell, [], {
         name: "xterm-256color",
         cols: 80,
         rows: 24,
-        cwd: process.env.HOME || "/",
+        cwd: initialCwd,
         env: process.env as Record<string, string>,
     });
 
@@ -60,6 +87,7 @@ function createSession(): Session {
         ws: null,
         cleanupTimer: null,
         alive: true,
+        cwd: initialCwd,
     };
 
     term.onData((data: string) => {
@@ -67,6 +95,19 @@ function createSession(): Session {
         session.scrollback += data;
         if (session.scrollback.length > MAX_SCROLLBACK) {
             session.scrollback = session.scrollback.slice(-MAX_SCROLLBACK);
+        }
+        // Detect OSC 7 cwd updates
+        let match;
+        OSC7_REGEX.lastIndex = 0;
+        let lastCwd: string | null = null;
+        while ((match = OSC7_REGEX.exec(data)) !== null) {
+            lastCwd = decodeCwd(match[1]);
+        }
+        if (lastCwd && lastCwd !== session.cwd) {
+            session.cwd = lastCwd;
+            if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+                session.ws.send(JSON.stringify({ type: "cwd", cwd: displayCwd(lastCwd) }));
+            }
         }
         // Forward to connected client
         if (session.ws && session.ws.readyState === WebSocket.OPEN) {
@@ -117,6 +158,9 @@ function attachWebSocket(session: Session, ws: WebSocket) {
 
     // Send session ID to client
     ws.send(JSON.stringify({ type: "session", id: session.id }));
+
+    // Send current cwd
+    ws.send(JSON.stringify({ type: "cwd", cwd: displayCwd(session.cwd) }));
 
     // Replay scrollback
     if (session.scrollback.length > 0) {
