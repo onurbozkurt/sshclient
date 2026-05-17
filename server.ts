@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { execSync } from "child_process";
 import crypto from "crypto";
 
@@ -31,6 +32,44 @@ function findShell(): string {
 
 const shell = findShell();
 console.log(`Using shell: ${shell}`);
+
+// Some shells (zsh on Linux, bash without VTE) don't emit OSC 7 by default.
+// We inject a hook so the pty always reports cwd changes, regardless of the
+// user's dotfiles. macOS zsh already does this via /etc/zshrc.
+function setupZshOsc7Dir(): string | null {
+    try {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-terminal-zsh-"));
+        const home = process.env.HOME || "";
+        const shq = (p: string) => "'" + p.replace(/'/g, "'\\''") + "'";
+
+        for (const file of [".zshenv", ".zprofile", ".zlogin"]) {
+            const real = path.join(home, file);
+            fs.writeFileSync(
+                path.join(dir, file),
+                `[[ -f ${shq(real)} ]] && source ${shq(real)}\n`,
+            );
+        }
+
+        const realZshrc = path.join(home, ".zshrc");
+        fs.writeFileSync(
+            path.join(dir, ".zshrc"),
+            `[[ -f ${shq(realZshrc)} ]] && source ${shq(realZshrc)}\n` +
+                `_web_terminal_emit_cwd() { printf '\\e]7;file://%s%s\\e\\\\' "\${HOST}" "\${PWD}" }\n` +
+                `autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _web_terminal_emit_cwd\n`,
+        );
+        return dir;
+    } catch (err) {
+        console.error("Failed to set up zsh OSC 7 hook dir:", err);
+        return null;
+    }
+}
+
+const shellBase = path.basename(shell);
+const zshHookDir = shellBase === "zsh" ? setupZshOsc7Dir() : null;
+const bashOsc7 =
+    shellBase === "bash"
+        ? `printf '\\033]7;file://%s%s\\033\\\\' "\${HOSTNAME}" "\${PWD}"`
+        : null;
 
 // --- Session management ---
 
@@ -72,12 +111,21 @@ const sessions = new Map<string, Session>();
 function createSession(): Session {
     const id = crypto.randomUUID();
     const initialCwd = process.env.HOME || "/";
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+    if (zshHookDir) {
+        env.ZDOTDIR = zshHookDir;
+    }
+    if (bashOsc7) {
+        env.PROMPT_COMMAND = env.PROMPT_COMMAND
+            ? `${bashOsc7};${env.PROMPT_COMMAND}`
+            : bashOsc7;
+    }
     const term = pty.spawn(shell, [], {
         name: "xterm-256color",
         cols: 80,
         rows: 24,
         cwd: initialCwd,
-        env: process.env as Record<string, string>,
+        env,
     });
 
     const session: Session = {
