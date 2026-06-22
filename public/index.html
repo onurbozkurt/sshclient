@@ -114,6 +114,127 @@
     .terminal-container.active { display: block; }
 
     .terminal-container .xterm { height: 100%; }
+
+    /* Command palette */
+    #palette-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(2px);
+      display: none;
+      align-items: flex-start;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    #palette-overlay.open { display: flex; }
+
+    #palette {
+      margin-top: 12vh;
+      width: 560px;
+      max-width: calc(100vw - 32px);
+      background: var(--tab-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #palette-input {
+      width: 100%;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--tab-text);
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+      font-size: 15px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #palette-input::placeholder { color: var(--tab-text-inactive); }
+
+    #palette-list {
+      list-style: none;
+      max-height: 50vh;
+      overflow-y: auto;
+      padding: 6px;
+    }
+
+    .palette-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      color: var(--tab-text-inactive);
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .palette-item.selected { background: var(--btn-hover); color: var(--tab-text); }
+
+    .palette-item .idx {
+      flex: 0 0 auto;
+      min-width: 20px;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 5px;
+      background: var(--border);
+      color: var(--tab-text);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .palette-item.selected .idx { background: var(--tab-active); }
+
+    .palette-item .name {
+      flex: 1 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .palette-item .dot {
+      flex: 0 0 auto;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--cyan, #94e2d5);
+    }
+
+    .palette-empty {
+      padding: 18px 14px;
+      color: var(--tab-text-inactive);
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    #palette-hint {
+      display: flex;
+      gap: 14px;
+      padding: 8px 14px;
+      border-top: 1px solid var(--border);
+      color: var(--tab-text-inactive);
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+      font-size: 11px;
+    }
+
+    #palette-hint kbd {
+      background: var(--border);
+      color: var(--tab-text);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: inherit;
+      font-size: 10px;
+    }
   </style>
 </head>
 <body>
@@ -121,6 +242,21 @@
     <div id="add-tab" title="New tab">+</div>
   </div>
   <div id="terminals"></div>
+
+  <div id="palette-overlay">
+    <div id="palette">
+      <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Sekme ara, numara gir veya yeni sekme aç…">
+      <ul id="palette-list"></ul>
+      <div id="palette-hint">
+        <span><kbd>↑</kbd><kbd>↓</kbd> gez</span>
+        <span><kbd>1</kbd>–<kbd>9</kbd> hızlı geçiş</span>
+        <span><kbd>↵</kbd> seç</span>
+        <span><kbd>⌘T</kbd> yeni sekme</span>
+        <span><kbd>esc</kbd> kapat</span>
+      </div>
+    </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
@@ -369,6 +505,179 @@
     }
 
     document.getElementById("add-tab").addEventListener("click", createTab);
+
+    /* ---------- Command palette (⌘K) ---------- */
+    const NEW_TAB_ACTION = "__new_tab__";
+    let paletteOpen = false;
+    let paletteSelected = 0;
+    let paletteItems = []; // [{tab, index} | {action:"new"}]
+
+    const overlay = document.getElementById("palette-overlay");
+    const paletteInput = document.getElementById("palette-input");
+    const paletteList = document.getElementById("palette-list");
+
+    function tabLabel(t) {
+      const i = tabs.indexOf(t);
+      return `${i + 1}: ${formatCwd(t.cwd)}`;
+    }
+
+    function fullTabText(t) {
+      const i = tabs.indexOf(t);
+      return `${i + 1} ${t.cwd || ""}`.toLowerCase();
+    }
+
+    function computePaletteItems(query) {
+      const q = query.trim().toLowerCase();
+      const items = [];
+
+      // Pure-number query → jump straight to that tab number.
+      if (/^\d+$/.test(q)) {
+        const n = parseInt(q, 10);
+        if (n >= 1 && n <= tabs.length) {
+          items.push({ tab: tabs[n - 1], index: n - 1 });
+        }
+      } else {
+        tabs.forEach((t, i) => {
+          if (!q || fullTabText(t).includes(q)) items.push({ tab: t, index: i });
+        });
+      }
+
+      // Always offer "new tab" (filtered by query when text is typed).
+      if (!q || "yeni sekme new tab".includes(q)) {
+        items.push({ action: "new" });
+      }
+      return items;
+    }
+
+    function renderPalette() {
+      const items = computePaletteItems(paletteInput.value);
+      paletteItems = items;
+      if (paletteSelected >= items.length) paletteSelected = items.length - 1;
+      if (paletteSelected < 0) paletteSelected = 0;
+
+      paletteList.innerHTML = "";
+      if (items.length === 0) {
+        const empty = document.createElement("li");
+        empty.className = "palette-empty";
+        empty.textContent = "Eşleşme yok";
+        paletteList.appendChild(empty);
+        return;
+      }
+
+      items.forEach((item, i) => {
+        const li = document.createElement("li");
+        li.className = `palette-item${i === paletteSelected ? " selected" : ""}`;
+
+        if (item.action === "new") {
+          const idx = document.createElement("span");
+          idx.className = "idx";
+          idx.textContent = "+";
+          const name = document.createElement("span");
+          name.className = "name";
+          name.textContent = "Yeni sekme";
+          li.appendChild(idx);
+          li.appendChild(name);
+        } else {
+          const idx = document.createElement("span");
+          idx.className = "idx";
+          idx.textContent = item.index + 1;
+          const name = document.createElement("span");
+          name.className = "name";
+          name.textContent = formatCwd(item.tab.cwd);
+          if (item.tab.cwd) name.title = item.tab.cwd;
+          li.appendChild(idx);
+          li.appendChild(name);
+          if (item.tab.id === activeTabId) {
+            const dot = document.createElement("span");
+            dot.className = "dot";
+            li.appendChild(dot);
+          }
+        }
+
+        li.addEventListener("mousemove", () => {
+          if (paletteSelected !== i) {
+            paletteSelected = i;
+            renderPalette();
+          }
+        });
+        li.addEventListener("click", () => activatePaletteItem(i));
+        paletteList.appendChild(li);
+      });
+    }
+
+    function activatePaletteItem(i) {
+      const item = paletteItems[i];
+      if (!item) return;
+      closePalette();
+      if (item.action === "new") createTab();
+      else switchTab(item.tab.id);
+    }
+
+    function openPalette() {
+      if (paletteOpen) return;
+      paletteOpen = true;
+      paletteSelected = 0;
+      paletteInput.value = "";
+      overlay.classList.add("open");
+      renderPalette();
+      paletteInput.focus();
+    }
+
+    function closePalette() {
+      if (!paletteOpen) return;
+      paletteOpen = false;
+      overlay.classList.remove("open");
+      const tab = getActiveTab();
+      if (tab) tab.term.focus();
+    }
+
+    paletteInput.addEventListener("input", () => {
+      paletteSelected = 0;
+      renderPalette();
+    });
+
+    paletteInput.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        paletteSelected = Math.min(paletteSelected + 1, paletteItems.length - 1);
+        renderPalette();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        paletteSelected = Math.max(paletteSelected - 1, 0);
+        renderPalette();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        activatePaletteItem(paletteSelected);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closePalette();
+      }
+    });
+
+    overlay.addEventListener("mousedown", (e) => {
+      if (e.target === overlay) closePalette();
+    });
+
+    // Global shortcuts. Capture phase so xterm doesn't swallow them first.
+    window.addEventListener("keydown", (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        paletteOpen ? closePalette() : openPalette();
+      } else if (mod && (e.key === "t" || e.key === "T")) {
+        e.preventDefault();
+        if (paletteOpen) closePalette();
+        createTab();
+      } else if (mod && /^[1-9]$/.test(e.key)) {
+        // ⌘1–9 → direct switch.
+        const n = parseInt(e.key, 10);
+        if (n <= tabs.length) {
+          e.preventDefault();
+          if (paletteOpen) closePalette();
+          switchTab(tabs[n - 1].id);
+        }
+      }
+    }, true);
 
     darkModeQuery.addEventListener("change", () => {
       const theme = currentTheme();
