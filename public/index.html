@@ -235,6 +235,24 @@
       font-family: inherit;
       font-size: 10px;
     }
+
+    .terminal-container.drag-over::after {
+      content: "Drop to upload";
+      position: absolute;
+      inset: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px dashed var(--tab-text);
+      border-radius: 8px;
+      background: rgba(137, 180, 250, 0.10);
+      color: var(--tab-text);
+      font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+      font-size: 16px;
+      letter-spacing: 0.5px;
+      pointer-events: none;
+      z-index: 10;
+    }
   </style>
 </head>
 <body>
@@ -419,6 +437,32 @@
       resizeObserver.observe(container);
       tab.resizeObserver = resizeObserver;
 
+      // Drag & drop file upload into this tab's working directory.
+      let dragDepth = 0;
+      container.addEventListener("dragenter", (e) => {
+        e.preventDefault();
+        dragDepth++;
+        container.classList.add("drag-over");
+      });
+      container.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      });
+      container.addEventListener("dragleave", () => {
+        dragDepth--;
+        if (dragDepth <= 0) {
+          dragDepth = 0;
+          container.classList.remove("drag-over");
+        }
+      });
+      container.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dragDepth = 0;
+        container.classList.remove("drag-over");
+        const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+        files.forEach((file) => uploadFile(tab, file));
+      });
+
       renderTabs();
       switchTab(id);
 
@@ -427,6 +471,31 @@
 
     function createTab() {
       return initTab(null);
+    }
+
+    async function uploadFile(tab, file) {
+      if (!tab.sessionId) {
+        tab.term.write("\r\n\x1b[31m[upload failed: session not ready]\x1b[0m\r\n");
+        return;
+      }
+      try {
+        const buf = await file.arrayBuffer();
+        const url = `/api/upload?sessionId=${encodeURIComponent(tab.sessionId)}&filename=${encodeURIComponent(file.name)}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: buf,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          tab.term.write(`\r\n\x1b[31m[upload failed: ${err.error || res.status}]\x1b[0m\r\n`);
+          return;
+        }
+        const data = await res.json();
+        tab.term.write(`\r\n\x1b[32m[uploaded]\x1b[0m ${file.name} → ${data.displayPath}\r\n`);
+      } catch {
+        tab.term.write("\r\n\x1b[31m[upload failed]\x1b[0m\r\n");
+      }
     }
 
     function getActiveTab() {

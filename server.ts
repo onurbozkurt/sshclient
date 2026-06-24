@@ -246,6 +246,39 @@ app.get("/api/sessions", (_req, res) => {
     res.json(ids);
 });
 
+// Upload a dropped file into the session's current working directory.
+app.post(
+    "/api/upload",
+    express.raw({ type: "application/octet-stream", limit: "100mb" }),
+    (req, res) => {
+        const sessionId = String(req.query.sessionId || "");
+        const session = sessions.get(sessionId);
+        if (!session || !session.alive) {
+            res.status(404).json({ error: "session not found" });
+            return;
+        }
+        // Strip any path components to prevent traversal outside cwd.
+        const filename = path.basename(String(req.query.filename || ""));
+        if (!filename || filename === "." || filename === "..") {
+            res.status(400).json({ error: "invalid filename" });
+            return;
+        }
+        const body = req.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+            res.status(400).json({ error: "empty body" });
+            return;
+        }
+        const dest = path.join(session.cwd, filename);
+        try {
+            fs.writeFileSync(dest, body);
+            res.json({ path: dest, displayPath: displayCwd(dest) });
+        } catch (err) {
+            console.error("Upload failed:", err);
+            res.status(500).json({ error: "write failed" });
+        }
+    },
+);
+
 // --- WebSocket handling ---
 
 wss.on("connection", (ws: WebSocket) => {
