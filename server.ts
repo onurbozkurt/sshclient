@@ -35,29 +35,37 @@ console.log(`Using shell: ${shell}`);
 
 // Some shells (zsh on Linux, bash without VTE) don't emit OSC 7 by default.
 // We inject a hook so the pty always reports cwd changes, regardless of the
-// user's dotfiles. macOS zsh already does this via /etc/zshrc.
-function setupZshOsc7Dir(): string | null {
+// user's dotfiles. For zsh we point ZDOTDIR at a dir holding only a .zshenv
+// that restores the user's real ZDOTDIR before zsh goes on to read
+// .zprofile/.zshrc/.zlogin, so those (and history, compdump) behave exactly
+// as in a normal terminal.
+const ZSH_HOOK_ZSHENV =
+    `if [[ -n "\${WEB_TERMINAL_USER_ZDOTDIR+x}" ]]; then\n` +
+    `    ZDOTDIR=$WEB_TERMINAL_USER_ZDOTDIR\n` +
+    `    unset WEB_TERMINAL_USER_ZDOTDIR\n` +
+    `else\n` +
+    `    unset ZDOTDIR\n` +
+    `fi\n` +
+    `[[ -f "\${ZDOTDIR:-$HOME}/.zshenv" ]] && source "\${ZDOTDIR:-$HOME}/.zshenv"\n` +
+    `if [[ -o interactive ]]; then\n` +
+    `    _web_terminal_emit_cwd() { printf '\\e]7;file://%s%s\\e\\\\' "\${HOST}" "\${PWD}" }\n` +
+    `    autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _web_terminal_emit_cwd\n` +
+    `fi\n`;
+
+let zshHookDir: string | null = null;
+
+// The hook dir lives in $TMPDIR, which macOS prunes of files untouched for a
+// few days. Rewrite it before every spawn so a long-running server never
+// starts zsh with an empty ZDOTDIR (which would silently skip ~/.zshrc).
+function ensureZshHookDir(): string | null {
     try {
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-terminal-zsh-"));
-        const home = process.env.HOME || "";
-        const shq = (p: string) => "'" + p.replace(/'/g, "'\\''") + "'";
-
-        for (const file of [".zshenv", ".zprofile", ".zlogin"]) {
-            const real = path.join(home, file);
-            fs.writeFileSync(
-                path.join(dir, file),
-                `[[ -f ${shq(real)} ]] && source ${shq(real)}\n`,
-            );
+        if (zshHookDir) {
+            fs.mkdirSync(zshHookDir, { recursive: true });
+        } else {
+            zshHookDir = fs.mkdtempSync(path.join(os.tmpdir(), "web-terminal-zsh-"));
         }
-
-        const realZshrc = path.join(home, ".zshrc");
-        fs.writeFileSync(
-            path.join(dir, ".zshrc"),
-            `[[ -f ${shq(realZshrc)} ]] && source ${shq(realZshrc)}\n` +
-                `_web_terminal_emit_cwd() { printf '\\e]7;file://%s%s\\e\\\\' "\${HOST}" "\${PWD}" }\n` +
-                `autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _web_terminal_emit_cwd\n`,
-        );
-        return dir;
+        fs.writeFileSync(path.join(zshHookDir, ".zshenv"), ZSH_HOOK_ZSHENV);
+        return zshHookDir;
     } catch (err) {
         console.error("Failed to set up zsh OSC 7 hook dir:", err);
         return null;
@@ -65,7 +73,6 @@ function setupZshOsc7Dir(): string | null {
 }
 
 const shellBase = path.basename(shell);
-const zshHookDir = shellBase === "zsh" ? setupZshOsc7Dir() : null;
 const bashOsc7 =
     shellBase === "bash"
         ? `printf '\\033]7;file://%s%s\\033\\\\' "\${HOSTNAME}" "\${PWD}"`
@@ -112,8 +119,12 @@ function createSession(): Session {
     const id = crypto.randomUUID();
     const initialCwd = process.env.HOME || "/";
     const env: Record<string, string> = { ...(process.env as Record<string, string>) };
-    if (zshHookDir) {
-        env.ZDOTDIR = zshHookDir;
+    const zdotdir = shellBase === "zsh" ? ensureZshHookDir() : null;
+    if (zdotdir) {
+        if (process.env.ZDOTDIR !== undefined) {
+            env.WEB_TERMINAL_USER_ZDOTDIR = process.env.ZDOTDIR;
+        }
+        env.ZDOTDIR = zdotdir;
     }
     if (bashOsc7) {
         env.PROMPT_COMMAND = env.PROMPT_COMMAND
